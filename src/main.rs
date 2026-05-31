@@ -1095,6 +1095,7 @@ struct App {
     agents: Vec<AgentTool>,
     path_prompt: Option<PathPrompt>,
     install_prompt: Option<InstallPrompt>,
+    broadcast_input: bool,
     shell: ShellSpec,
     tx: Sender<AppEvent>,
     language: Language,
@@ -1119,6 +1120,7 @@ impl App {
             agents: detect_agents(),
             path_prompt: None,
             install_prompt: None,
+            broadcast_input: false,
             shell,
             tx,
             language,
@@ -1161,6 +1163,24 @@ impl App {
 
     fn active_pane_mut(&mut self) -> Option<&mut Pane> {
         self.panes.get_mut(self.active)
+    }
+
+    fn send_to_input_targets(&mut self, bytes: &[u8]) -> Result<()> {
+        if self.broadcast_input {
+            for index in self.visible_indices() {
+                if let Some(pane) = self.panes.get_mut(index) {
+                    if pane.exited {
+                        continue;
+                    }
+                    pane.reset_scrollback();
+                    pane.send(bytes)?;
+                }
+            }
+        } else if let Some(pane) = self.active_pane_mut() {
+            pane.reset_scrollback();
+            pane.send(bytes)?;
+        }
+        Ok(())
     }
 
     fn visible_indices(&self) -> Vec<usize> {
@@ -1532,15 +1552,30 @@ impl App {
                     self.refresh_agents();
                     return Ok(false);
                 }
+                KeyCode::Char('b') => {
+                    self.broadcast_input = !self.broadcast_input;
+                    self.status = ui_text(
+                        self.language,
+                        if self.broadcast_input {
+                            "broadcast input on"
+                        } else {
+                            "broadcast input off"
+                        },
+                        if self.broadcast_input {
+                            "编队输入已开启"
+                        } else {
+                            "编队输入已关闭"
+                        },
+                    )
+                    .to_string();
+                    return Ok(false);
+                }
                 _ => {}
             }
         }
 
         if let Some(bytes) = key_to_pty_bytes(key) {
-            if let Some(pane) = self.active_pane_mut() {
-                pane.reset_scrollback();
-                pane.send(&bytes)?;
-            }
+            self.send_to_input_targets(&bytes)?;
         }
         Ok(false)
     }
@@ -2016,10 +2051,7 @@ impl App {
             return Ok(());
         }
 
-        if let Some(pane) = self.active_pane_mut() {
-            pane.reset_scrollback();
-            pane.send(text.as_bytes())?;
-        }
+        self.send_to_input_targets(text.as_bytes())?;
         Ok(())
     }
 }
@@ -2384,13 +2416,19 @@ fn draw_workspace(frame: &mut Frame, app: &mut App, area: Rect) {
         ])
         .split(area);
 
+    let broadcast = if app.broadcast_input {
+        ui_text(app.language, "[broadcast] ", "[编队] ")
+    } else {
+        ""
+    };
     let title = app
         .panes
         .get(app.active)
         .map(|pane| {
             if pane.scrollback() > 0 {
                 format!(
-                    "{}-{} / {}  [{} {}]  |  Ctrl+H {}  Ctrl+T {}  Ctrl+Q {}",
+                    "{}{}-{} / {}  [{} {}]  |  Ctrl+H {}  Ctrl+T {}  Ctrl+Q {}",
+                    broadcast,
                     ui_text(app.language, "group", "分组"),
                     app.active_group + 1,
                     pane.title,
@@ -2402,7 +2440,8 @@ fn draw_workspace(frame: &mut Frame, app: &mut App, area: Rect) {
                 )
             } else {
                 format!(
-                    "{}-{} / {}  |  Ctrl+H {}  Ctrl+T {}  Ctrl+Q {}",
+                    "{}{}-{} / {}  |  Ctrl+H {}  Ctrl+T {}  Ctrl+Q {}",
+                    broadcast,
                     ui_text(app.language, "group", "分组"),
                     app.active_group + 1,
                     pane.title,
@@ -2421,10 +2460,11 @@ fn draw_workspace(frame: &mut Frame, app: &mut App, area: Rect) {
     draw_panes(frame, app, chunks[1]);
 
     let hint = format!(
-        "{} {}   {}   Ctrl+G {}  Ctrl+O {}  Alt+1..9 {}",
+        "{} {}   {}   Ctrl+B {}  Ctrl+G {}  Ctrl+O {}  Alt+1..9 {}",
         SPINNER[app.spinner],
         ui_text(app.language, "direct PTY input", "直接 PTY 输入"),
         ui_text(app.language, "drag borders resize", "拖动边框调整大小"),
+        ui_text(app.language, "broadcast", "编队"),
         ui_text(app.language, "group", "分组"),
         ui_text(app.language, "move", "移动"),
         ui_text(app.language, "switch", "切换")
@@ -3170,6 +3210,7 @@ fn draw_help(frame: &mut Frame, area: Rect, language: Language) {
             Line::from("Ctrl+G  创建分组"),
             Line::from("Ctrl+O  移动面板到下一个分组"),
             Line::from("Ctrl+A  刷新 Agent 检测"),
+            Line::from("Ctrl+B  编队输入：把普通输入广播到当前分组所有面板"),
             Line::from("Ctrl+T  切换语言"),
             Line::from("Alt+1..9 或 Ctrl+1..9  切换分组"),
             Line::from("鼠标拖动面板边框可调整大小"),
@@ -3204,6 +3245,7 @@ fn draw_help(frame: &mut Frame, area: Rect, language: Language) {
             Line::from("Ctrl+G  create group"),
             Line::from("Ctrl+O  move pane to next group"),
             Line::from("Ctrl+A  refresh agent detection"),
+            Line::from("Ctrl+B  broadcast normal input to all panes in current group"),
             Line::from("Ctrl+T  switch language"),
             Line::from("Alt+1..9 or Ctrl+1..9  switch group"),
             Line::from("Mouse drag pane borders to resize"),
@@ -3391,6 +3433,7 @@ KEYS:
   Ctrl+G  create group
   Ctrl+O  move pane to next group
   Ctrl+A  refresh agent detection
+  Ctrl+B  toggle broadcast input to all panes in current group
   Ctrl+T  switch language
   Alt+1..9 or Ctrl+1..9  switch group
   Ctrl+H  help
