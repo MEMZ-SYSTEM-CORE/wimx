@@ -933,6 +933,7 @@ struct PathBrowserEntry {
 enum PathBrowserEntryKind {
     Current,
     Parent,
+    Drive,
     Directory,
 }
 
@@ -962,6 +963,16 @@ impl PathBrowser {
                 kind: PathBrowserEntryKind::Parent,
             });
         }
+
+        entries.extend(
+            windows_drive_roots()
+                .into_iter()
+                .map(|path| PathBrowserEntry {
+                    label: format!("[V] {}", path.display()),
+                    path,
+                    kind: PathBrowserEntryKind::Drive,
+                }),
+        );
 
         let mut dirs = Vec::new();
         if let Ok(read_dir) = std::fs::read_dir(&self.cwd) {
@@ -1006,6 +1017,19 @@ impl PathBrowser {
     fn selected_entry(&self) -> Option<&PathBrowserEntry> {
         self.entries.get(self.selected)
     }
+}
+
+fn windows_drive_roots() -> Vec<PathBuf> {
+    if !cfg!(windows) {
+        return Vec::new();
+    }
+
+    (b'C'..=b'Z')
+        .filter_map(|letter| {
+            let root = format!("{}:\\", char::from(letter));
+            Path::new(&root).is_dir().then(|| PathBuf::from(root))
+        })
+        .collect()
 }
 
 impl PathPrompt {
@@ -1697,7 +1721,9 @@ impl App {
                             PathBrowserEntryKind::Current => {
                                 prompt.input = prompt.browser.cwd.to_string_lossy().to_string();
                             }
-                            PathBrowserEntryKind::Parent | PathBrowserEntryKind::Directory => {
+                            PathBrowserEntryKind::Parent
+                            | PathBrowserEntryKind::Drive
+                            | PathBrowserEntryKind::Directory => {
                                 prompt.browser.set_cwd(path);
                                 prompt.input = prompt.browser.cwd.to_string_lossy().to_string();
                             }
@@ -2964,8 +2990,8 @@ fn draw_path_prompt(frame: &mut Frame, app: &App, area: Rect) {
         ]),
         Line::from(ui_text(
             app.language,
-            "Up/Down browse, Left parent, Right open selected directory.",
-            "上下浏览，Left 返回上级，Right 打开选中目录。",
+            "Up/Down browse, Left parent, Right open selected directory/drive.",
+            "上下浏览，Left 返回上级，Right 打开选中目录/盘符。",
         )),
     ];
     frame.render_widget(
@@ -3087,7 +3113,9 @@ fn draw_help(frame: &mut Frame, area: Rect, language: Language) {
             Line::from("Alt+1..9 或 Ctrl+1..9  切换分组"),
             Line::from("鼠标拖动面板边框可调整大小"),
             Line::from("点击侧边栏 Agent，输入路径或用文件浏览器选择目录后按 Enter 启动"),
-            Line::from("路径弹窗：Up/Down 浏览，Left 返回上级，Right 进入选中目录，Tab 同步输入"),
+            Line::from(
+                "路径弹窗：Up/Down 浏览，Left 返回上级，Right 进入选中目录/盘符，Tab 同步输入",
+            ),
             Line::from("未安装的 Agent 会先弹出安装确认"),
             Line::from("Ctrl+H  隐藏/显示帮助"),
             Line::from("Ctrl+Q  退出"),
@@ -3122,7 +3150,7 @@ fn draw_help(frame: &mut Frame, area: Rect, language: Language) {
                 "Click an agent in the sidebar, enter a path or browse a directory, then press Enter",
             ),
             Line::from(
-                "Path prompt: Up/Down browse, Left parent, Right open selected directory, Tab sync input",
+                "Path prompt: Up/Down browse, Left parent, Right open selected directory/drive, Tab sync input",
             ),
             Line::from("Missing agents first ask whether to install"),
             Line::from("Ctrl+H  hide/show this help"),
