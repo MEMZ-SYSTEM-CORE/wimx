@@ -1,0 +1,15 @@
+[package]
+name = "wimx"
+version = "0.1.0"
+edition = "2024"
+description = "A CMUX-inspired Rust terminal workspace for running multiple agent panes."
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+crossbeam-channel = "0.5"
+crossterm = "0.29"
+portable-pty = "0.9"
+ratatui = "0.30"
+unicode-width = "0.2"
+vt100 = "0.16"
