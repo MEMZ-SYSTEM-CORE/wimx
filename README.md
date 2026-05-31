@@ -74,7 +74,7 @@ Installed agents are marked `[ok]` in the sidebar. Click one, enter a project pa
 Press `Ctrl+A` to refresh detection after installing or removing an agent while Wimx is open.
 
 On Windows, Wimx prefers real launchable entries (`.exe`, `.cmd`, `.bat`, `.com`, `.ps1`) over extensionless npm/pnpm shims. Batch shims are launched through `cmd.exe`, and PowerShell shims are launched through Windows PowerShell.
-Clicking an uninstalled agent now asks whether to install it, and the path prompt includes a simple directory browser. On Windows, the browser lists drive roots such as `C:\` and `D:\` so project selection can move across drive letters.
+Clicking an uninstalled agent now asks whether to install it, and the path prompt includes a scrollable directory browser. On Windows, the browser lists drive roots such as `C:\` and `D:\` so project selection can move across drive letters.
 
 ## Verify
 

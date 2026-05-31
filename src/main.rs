@@ -1032,6 +1032,16 @@ fn windows_drive_roots() -> Vec<PathBuf> {
         .collect()
 }
 
+fn browser_visible_start(browser: &PathBrowser, visible_rows: usize) -> usize {
+    if visible_rows == 0 || browser.entries.len() <= visible_rows {
+        return 0;
+    }
+    browser
+        .selected
+        .saturating_sub(visible_rows / 2)
+        .min(browser.entries.len() - visible_rows)
+}
+
 impl PathPrompt {
     fn new(agent_index: usize, input: String) -> Self {
         let cwd = path_from_prompt(&input);
@@ -1687,6 +1697,29 @@ impl App {
         Ok(false)
     }
 
+    fn handle_install_prompt_mouse(&mut self, mouse: MouseEvent) -> Result<()> {
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return Ok(());
+        }
+
+        let (cols, rows) = crossterm_terminal::size().unwrap_or((DEFAULT_COLS, DEFAULT_ROWS));
+        let area = centered_fixed_rect(64, 9, Rect::new(0, 0, cols.max(1), rows.max(1)));
+        if !point_in_rect(area, mouse.column, mouse.row) {
+            return Ok(());
+        }
+
+        let Some(prompt) = self.install_prompt.take() else {
+            return Ok(());
+        };
+        if mouse.column < area.x + area.width / 2 {
+            self.install_agent(prompt.agent_index)?;
+        } else {
+            self.install_prompt = None;
+            self.set_status("install canceled", "已取消安装");
+        }
+        Ok(())
+    }
+
     fn handle_path_prompt_mouse(&mut self, mouse: MouseEvent) -> Result<()> {
         let (cols, rows) = crossterm_terminal::size().unwrap_or((DEFAULT_COLS, DEFAULT_ROWS));
         let area = centered_fixed_rect(96, 20, Rect::new(0, 0, cols.max(1), rows.max(1)));
@@ -1710,8 +1743,11 @@ impl App {
                 browser_area.height.saturating_sub(2),
             );
             if point_in_rect(inner, mouse.column, mouse.row) {
-                let index = usize::from(mouse.row.saturating_sub(inner.y));
+                let row_index = usize::from(mouse.row.saturating_sub(inner.y));
                 if let Some(prompt) = self.path_prompt.as_mut() {
+                    let visible_rows = usize::from(inner.height).max(1);
+                    let visible_start = browser_visible_start(&prompt.browser, visible_rows);
+                    let index = visible_start + row_index;
                     if let Some(entry) = prompt.browser.entries.get(index) {
                         let path = entry.path.clone();
                         let kind = entry.kind;
@@ -1838,7 +1874,7 @@ impl App {
 
     fn handle_mouse(&mut self, mouse: MouseEvent) -> Result<()> {
         if self.install_prompt.is_some() {
-            return Ok(());
+            return self.handle_install_prompt_mouse(mouse);
         }
         if self.path_prompt.is_some() {
             return self.handle_path_prompt_mouse(mouse);
@@ -2947,11 +2983,15 @@ fn draw_path_prompt(frame: &mut Frame, app: &App, area: Rect) {
         header_area,
     );
 
+    let visible_rows = usize::from(browser_area.height.saturating_sub(2)).max(1);
+    let visible_start = browser_visible_start(&prompt.browser, visible_rows);
     let browser_lines: Vec<ListItem> = prompt
         .browser
         .entries
         .iter()
         .enumerate()
+        .skip(visible_start)
+        .take(visible_rows)
         .map(|(index, entry)| {
             let selected = index == prompt.browser.selected;
             let style = if selected {
@@ -2965,12 +3005,14 @@ fn draw_path_prompt(frame: &mut Frame, app: &App, area: Rect) {
             ListItem::new(Line::from(Span::styled(entry.label.clone(), style)))
         })
         .collect();
+    let browser_title = format!(
+        " {} {}/{} ",
+        ui_text(app.language, "browser", "浏览"),
+        prompt.browser.selected.saturating_add(1),
+        prompt.browser.entries.len().max(1)
+    );
     frame.render_widget(
-        List::new(browser_lines).block(Block::default().borders(Borders::ALL).title(ui_text(
-            app.language,
-            " browser ",
-            " 浏览 ",
-        ))),
+        List::new(browser_lines).block(Block::default().borders(Borders::ALL).title(browser_title)),
         browser_area,
     );
 
@@ -3051,6 +3093,25 @@ fn draw_install_prompt(frame: &mut Frame, app: &App, area: Rect) {
             ),
             Span::raw(command),
         ]),
+        Line::from(vec![
+            Span::styled(
+                ui_text(
+                    app.language,
+                    "[ left click / Y install ]",
+                    "[ 左键左半 / Y 安装 ]",
+                ),
+                Style::default().fg(Color::Green),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                ui_text(
+                    app.language,
+                    "[ right half / N cancel ]",
+                    "[ 右半 / N 取消 ]",
+                ),
+                Style::default().fg(Color::Yellow),
+            ),
+        ]),
     ];
     frame.render_widget(
         Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(ui_text(
@@ -3116,7 +3177,7 @@ fn draw_help(frame: &mut Frame, area: Rect, language: Language) {
             Line::from(
                 "路径弹窗：Up/Down 浏览，Left 返回上级，Right 进入选中目录/盘符，Tab 同步输入",
             ),
-            Line::from("未安装的 Agent 会先弹出安装确认"),
+            Line::from("未安装的 Agent 会先弹出安装确认，左半点击安装，右半点击取消"),
             Line::from("Ctrl+H  隐藏/显示帮助"),
             Line::from("Ctrl+Q  退出"),
             Line::from(""),
@@ -3152,7 +3213,9 @@ fn draw_help(frame: &mut Frame, area: Rect, language: Language) {
             Line::from(
                 "Path prompt: Up/Down browse, Left parent, Right open selected directory/drive, Tab sync input",
             ),
-            Line::from("Missing agents first ask whether to install"),
+            Line::from(
+                "Missing agents first ask whether to install; click left half to install or right half to cancel",
+            ),
             Line::from("Ctrl+H  hide/show this help"),
             Line::from("Ctrl+Q  quit"),
             Line::from(""),
