@@ -38,6 +38,8 @@ Ctrl+A  refresh agent detection
 Ctrl+B  toggle broadcast input to all panes in current group
 Ctrl+P  command palette
 Ctrl+F  focus right-side file browser
+Ctrl+E  show/hide right-side file browser
+Alt+[ / Alt+]  resize file browser width
 Ctrl+T  switch language
 Alt+1..9 or Ctrl+1..9  switch group
 Ctrl+H  help
@@ -47,7 +49,7 @@ Ctrl+Q  quit
 Normal typing is sent directly to the focused PTY. Windows duplicate key events are filtered by `KeyEventKind::Press`.
 When broadcast input is enabled with `Ctrl+B`, ordinary typing and paste are sent to every running pane in the active group.
 Press `Ctrl+P` to open the command palette, run common pane/group actions, or quickly start an installed Agent.
-Press `Ctrl+F` to focus the right-side file browser. Use Up/Down to select, Enter/Right to enter a directory, Left to go to the parent directory, `R` to refresh, and `A` to open agent commands for the selected project directory.
+Press `Ctrl+F` to focus the right-side file browser. Use Up/Down to select, Enter/Right to enter a directory, Left to go to the parent directory, `R` to refresh, and `A` to open agent commands for the selected project directory. Use `Ctrl+E` to hide/show it, `Alt+[` / `Alt+]` to change its width, or drag its left border with the mouse.
 
 Set `WIMX_LANG=zh` to start in Chinese, or press `Ctrl+T` inside Wimx to switch between English and Chinese.
 
@@ -58,6 +60,7 @@ Left click group      switch group
 Left click agent      ask project path, then launch installed agent there
 Left click file       select in the right file browser
 Right click folder    open a folder in the right file browser
+Drag file border      resize the right file browser
 Left click pane       focus pane
 Drag pane border      resize panes
 Wheel up/down         scroll pane history
@@ -91,3 +94,7 @@ cargo run -- --smoke-test
 ```
 
 The smoke test starts a real PTY shell, answers terminal cursor queries, runs a command, and checks that output is returned.
+
+## Source Layout
+
+The Rust code is split by responsibility under `src/`: shell and agent detection, browser state, app actions, keyboard handling, mouse handling, rendering, layout, PTY spawning, and tests live in separate files instead of one large `main.rs`.
