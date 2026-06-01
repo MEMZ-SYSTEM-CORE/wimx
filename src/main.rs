@@ -1023,6 +1023,166 @@ impl PathBrowser {
     }
 }
 
+struct FileBrowser {
+    cwd: PathBuf,
+    entries: Vec<FileBrowserEntry>,
+    selected: usize,
+}
+
+struct FileBrowserEntry {
+    label: String,
+    name: String,
+    path: PathBuf,
+    kind: FileBrowserEntryKind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FileBrowserEntryKind {
+    Parent,
+    Drive,
+    Directory,
+    File,
+}
+
+impl FileBrowser {
+    fn new(cwd: PathBuf) -> Self {
+        let mut browser = Self {
+            cwd,
+            entries: Vec::new(),
+            selected: 0,
+        };
+        browser.refresh();
+        browser
+    }
+
+    fn refresh(&mut self) {
+        if !self.cwd.is_dir() {
+            self.cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        }
+        self.cwd = normalize_command_cwd(self.cwd.clone());
+
+        let mut entries = Vec::new();
+        if let Some(parent) = self.cwd.parent() {
+            entries.push(FileBrowserEntry {
+                label: format!("[..] {}", parent.display()),
+                name: "..".to_string(),
+                path: parent.to_path_buf(),
+                kind: FileBrowserEntryKind::Parent,
+            });
+        }
+
+        entries.extend(
+            windows_drive_roots()
+                .into_iter()
+                .map(|path| FileBrowserEntry {
+                    label: format!("[V] {}", path.display()),
+                    name: path.display().to_string(),
+                    path,
+                    kind: FileBrowserEntryKind::Drive,
+                }),
+        );
+
+        let mut dirs = Vec::new();
+        let mut files = Vec::new();
+        if let Ok(read_dir) = std::fs::read_dir(&self.cwd) {
+            for entry in read_dir.flatten() {
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().trim().to_string();
+                if name.is_empty() {
+                    continue;
+                }
+                let sort_name = name.to_ascii_lowercase();
+                if file_type.is_dir() {
+                    dirs.push((sort_name, path, name));
+                } else if file_type.is_file() {
+                    files.push((sort_name, path, name));
+                }
+            }
+        }
+        dirs.sort_by(|a, b| a.0.cmp(&b.0));
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+
+        entries.extend(dirs.into_iter().map(|(_, path, name)| FileBrowserEntry {
+            label: format!("[D] {name}"),
+            name,
+            path,
+            kind: FileBrowserEntryKind::Directory,
+        }));
+        entries.extend(files.into_iter().map(|(_, path, name)| FileBrowserEntry {
+            label: format!("[F] {name}"),
+            name,
+            path,
+            kind: FileBrowserEntryKind::File,
+        }));
+
+        self.entries = entries;
+        self.selected = self.selected.min(self.entries.len().saturating_sub(1));
+    }
+
+    fn move_selection(&mut self, delta: i32) {
+        if self.entries.is_empty() {
+            self.selected = 0;
+            return;
+        }
+        let max_index = self.entries.len().saturating_sub(1) as i32;
+        self.selected = (self.selected as i32 + delta).clamp(0, max_index) as usize;
+    }
+
+    fn set_cwd(&mut self, cwd: PathBuf) {
+        self.cwd = normalize_command_cwd(cwd);
+        self.selected = 0;
+        self.refresh();
+    }
+
+    fn open_selected(&mut self) -> bool {
+        let Some(entry) = self.selected_entry() else {
+            return false;
+        };
+        let kind = entry.kind;
+        let path = entry.path.clone();
+        if matches!(
+            kind,
+            FileBrowserEntryKind::Parent
+                | FileBrowserEntryKind::Drive
+                | FileBrowserEntryKind::Directory
+        ) {
+            self.set_cwd(path);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn parent(&mut self) -> bool {
+        let Some(parent) = self.cwd.parent() else {
+            return false;
+        };
+        self.set_cwd(parent.to_path_buf());
+        true
+    }
+
+    fn selected_entry(&self) -> Option<&FileBrowserEntry> {
+        self.entries.get(self.selected)
+    }
+
+    fn agent_cwd(&self) -> PathBuf {
+        self.selected_entry()
+            .filter(|entry| {
+                matches!(
+                    entry.kind,
+                    FileBrowserEntryKind::Parent
+                        | FileBrowserEntryKind::Drive
+                        | FileBrowserEntryKind::Directory
+                )
+            })
+            .map(|entry| entry.path.clone())
+            .unwrap_or_else(|| self.cwd.clone())
+    }
+}
+
 fn windows_drive_roots() -> Vec<PathBuf> {
     if !cfg!(windows) {
         return Vec::new();
@@ -1097,6 +1257,8 @@ enum PaletteAction {
     RespawnPane,
     SwitchLanguage,
     ToggleHelp,
+    FocusFileBrowser,
+    RefreshFileBrowser,
     Agent(usize),
 }
 
@@ -1136,6 +1298,8 @@ struct App {
     path_prompt: Option<PathPrompt>,
     install_prompt: Option<InstallPrompt>,
     command_palette: Option<CommandPalette>,
+    file_browser: FileBrowser,
+    file_browser_focused: bool,
     broadcast_input: bool,
     shell: ShellSpec,
     tx: Sender<AppEvent>,
@@ -1162,6 +1326,10 @@ impl App {
             path_prompt: None,
             install_prompt: None,
             command_palette: None,
+            file_browser: FileBrowser::new(normalize_command_cwd(
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            )),
+            file_browser_focused: false,
             broadcast_input: false,
             shell,
             tx,
@@ -1303,8 +1471,7 @@ impl App {
             );
             return Ok(());
         }
-        let cwd =
-            normalize_command_cwd(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let cwd = self.file_browser.agent_cwd();
         self.path_prompt = Some(PathPrompt::new(
             agent_index,
             cwd.to_string_lossy().to_string(),
@@ -1329,7 +1496,9 @@ impl App {
             );
             return Ok(());
         };
-        spec.cwd = Some(normalize_command_cwd(cwd));
+        let cwd = normalize_command_cwd(cwd);
+        spec.cwd = Some(cwd.clone());
+        self.file_browser.set_cwd(cwd);
         self.new_process_pane(spec, &agent.command)?;
         self.status = format!(
             "{} {}",
@@ -1620,6 +1789,16 @@ impl App {
                 action: PaletteAction::SwitchLanguage,
             },
             PaletteCommand {
+                label: ui_text(self.language, "Focus file browser", "聚焦文件浏览器").to_string(),
+                detail: "Ctrl+F".to_string(),
+                action: PaletteAction::FocusFileBrowser,
+            },
+            PaletteCommand {
+                label: ui_text(self.language, "Refresh file browser", "刷新文件浏览器").to_string(),
+                detail: "browser R".to_string(),
+                action: PaletteAction::RefreshFileBrowser,
+            },
+            PaletteCommand {
                 label: ui_text(self.language, "Toggle help", "显示/隐藏帮助").to_string(),
                 detail: "Ctrl+H".to_string(),
                 action: PaletteAction::ToggleHelp,
@@ -1678,6 +1857,14 @@ impl App {
             PaletteAction::RespawnPane => self.respawn_active(),
             PaletteAction::SwitchLanguage => self.toggle_language(),
             PaletteAction::ToggleHelp => self.show_help = !self.show_help,
+            PaletteAction::FocusFileBrowser => {
+                self.file_browser_focused = true;
+                self.set_status("file browser focused", "文件浏览器已聚焦");
+            }
+            PaletteAction::RefreshFileBrowser => {
+                self.file_browser.refresh();
+                self.set_status("file browser refreshed", "文件浏览器已刷新");
+            }
             PaletteAction::Agent(index) => self.launch_agent(index)?,
         }
         Ok(())
@@ -1737,6 +1924,66 @@ impl App {
                 if let Some(action) = action {
                     self.run_palette_action(action)?;
                 }
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    fn handle_file_browser_key(&mut self, key: KeyEvent) -> Result<bool> {
+        match key.code {
+            KeyCode::Esc => {
+                self.file_browser_focused = false;
+                self.set_status("file browser blurred", "文件浏览器已取消聚焦");
+            }
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
+                self.file_browser.move_selection(-1);
+            }
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
+                self.file_browser.move_selection(1);
+            }
+            KeyCode::PageUp => {
+                self.file_browser.move_selection(-8);
+            }
+            KeyCode::PageDown => {
+                self.file_browser.move_selection(8);
+            }
+            KeyCode::Home => {
+                self.file_browser.selected = 0;
+            }
+            KeyCode::End => {
+                self.file_browser.selected = self.file_browser.entries.len().saturating_sub(1);
+            }
+            KeyCode::Left | KeyCode::Backspace => {
+                if self.file_browser.parent() {
+                    self.status = format!(
+                        "{} {}",
+                        ui_text(self.language, "folder", "目录"),
+                        self.file_browser.cwd.display()
+                    );
+                }
+            }
+            KeyCode::Enter | KeyCode::Right => {
+                if self.file_browser.open_selected() {
+                    self.status = format!(
+                        "{} {}",
+                        ui_text(self.language, "folder", "目录"),
+                        self.file_browser.cwd.display()
+                    );
+                } else if let Some(entry) = self.file_browser.selected_entry() {
+                    self.status = format!(
+                        "{} {}",
+                        ui_text(self.language, "selected", "已选择"),
+                        entry.path.display()
+                    );
+                }
+            }
+            KeyCode::Char('r') | KeyCode::Char('R') => {
+                self.file_browser.refresh();
+                self.set_status("file browser refreshed", "文件浏览器已刷新");
+            }
+            KeyCode::Char('a') | KeyCode::Char('A') => {
+                self.open_command_palette();
             }
             _ => {}
         }
@@ -1814,6 +2061,15 @@ impl App {
                     self.toggle_language();
                     return Ok(false);
                 }
+                KeyCode::Char('f') => {
+                    self.file_browser_focused = !self.file_browser_focused;
+                    if self.file_browser_focused {
+                        self.set_status("file browser focused", "文件浏览器已聚焦");
+                    } else {
+                        self.set_status("file browser blurred", "文件浏览器已取消聚焦");
+                    }
+                    return Ok(false);
+                }
                 KeyCode::Char('a') => {
                     self.refresh_agents();
                     return Ok(false);
@@ -1824,6 +2080,10 @@ impl App {
                 }
                 _ => {}
             }
+        }
+
+        if self.file_browser_focused {
+            return self.handle_file_browser_key(key);
         }
 
         if let Some(bytes) = key_to_pty_bytes(key) {
@@ -2123,6 +2383,59 @@ impl App {
         Ok(())
     }
 
+    fn handle_file_browser_mouse(&mut self, mouse: MouseEvent, area: Rect) -> Result<bool> {
+        if !point_in_rect(area, mouse.column, mouse.row) {
+            return Ok(false);
+        }
+
+        self.file_browser_focused = true;
+        let list_area = file_browser_list_area(area);
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                self.file_browser.move_selection(-1);
+                return Ok(true);
+            }
+            MouseEventKind::ScrollDown => {
+                self.file_browser.move_selection(1);
+                return Ok(true);
+            }
+            MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Down(MouseButton::Right) => {}
+            _ => return Ok(true),
+        }
+
+        let inner = Rect::new(
+            list_area.x + 1,
+            list_area.y + 1,
+            list_area.width.saturating_sub(2),
+            list_area.height.saturating_sub(2),
+        );
+        if !point_in_rect(inner, mouse.column, mouse.row) {
+            return Ok(true);
+        }
+
+        let selected = self
+            .file_browser
+            .selected
+            .min(self.file_browser.entries.len().saturating_sub(1));
+        let visible_rows = usize::from(inner.height).max(1);
+        let visible_start =
+            palette_visible_start(selected, self.file_browser.entries.len(), visible_rows);
+        let index = visible_start + usize::from(mouse.row.saturating_sub(inner.y));
+        if index < self.file_browser.entries.len() {
+            self.file_browser.selected = index;
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Right)) {
+                if self.file_browser.open_selected() {
+                    self.status = format!(
+                        "{} {}",
+                        ui_text(self.language, "folder", "目录"),
+                        self.file_browser.cwd.display()
+                    );
+                }
+            }
+        }
+        Ok(true)
+    }
+
     fn resize_drag_from_point(&self, pane_area: Rect, x: u16, y: u16) -> Option<ResizeDrag> {
         let visible_count = self.visible_indices().len();
         if visible_count <= 1 {
@@ -2250,6 +2563,14 @@ impl App {
             _ => {}
         }
 
+        if let Some(file_browser) = ui.file_browser {
+            if self.handle_file_browser_mouse(mouse, file_browser)? {
+                return Ok(());
+            } else if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                self.file_browser_focused = false;
+            }
+        }
+
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
             if let Some(group) =
                 group_index_from_point(ui.group_list, self.group_count, mouse.column, mouse.row)
@@ -2368,7 +2689,10 @@ impl App {
             prompt.input.push_str(pasted);
             return Ok(());
         }
-        if self.install_prompt.is_some() || self.command_palette.is_some() {
+        if self.install_prompt.is_some()
+            || self.command_palette.is_some()
+            || self.file_browser_focused
+        {
             return Ok(());
         }
 
@@ -2544,6 +2868,9 @@ fn draw(frame: &mut Frame, app: &mut App) {
 
     draw_sidebar(frame, app, ui.sidebar);
     draw_workspace(frame, app, ui.workspace);
+    if let Some(file_browser) = ui.file_browser {
+        draw_file_browser(frame, app, file_browser);
+    }
 
     if app.show_help {
         draw_help(frame, centered_rect(58, 42, area), app.language);
@@ -2784,17 +3111,221 @@ fn draw_workspace(frame: &mut Frame, app: &mut App, area: Rect) {
     draw_panes(frame, app, chunks[1]);
 
     let hint = format!(
-        "{} {}   {}   Ctrl+P {}  Ctrl+B {}  Ctrl+G {}  Ctrl+O {}  Alt+1..9 {}",
+        "{} {}   {}   Ctrl+P {}  Ctrl+F {}  Ctrl+B {}  Ctrl+G {}  Ctrl+O {}  Alt+1..9 {}",
         SPINNER[app.spinner],
         ui_text(app.language, "direct PTY input", "直接 PTY 输入"),
         ui_text(app.language, "drag borders resize", "拖动边框调整大小"),
         ui_text(app.language, "commands", "命令"),
+        ui_text(app.language, "files", "文件"),
         ui_text(app.language, "broadcast", "编队"),
         ui_text(app.language, "group", "分组"),
         ui_text(app.language, "move", "移动"),
         ui_text(app.language, "switch", "切换")
     );
     frame.render_widget(Paragraph::new(hint), chunks[2]);
+}
+
+fn draw_file_browser(frame: &mut Frame, app: &App, area: Rect) {
+    let browser = &app.file_browser;
+    let border_style = if app.file_browser_focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(8),
+            Constraint::Length(8),
+            Constraint::Length(2),
+        ])
+        .split(area);
+
+    let path_width = usize::from(chunks[0].width.saturating_sub(4));
+    let cwd = tail_to_width(&browser.cwd.display().to_string(), path_width);
+    let header = Paragraph::new(vec![
+        Line::from(Span::styled(
+            ui_text(app.language, "Agent project files", "Agent 项目文件"),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(cwd, Style::default().fg(Color::DarkGray))),
+    ])
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .title(ui_text(app.language, " files ", " 文件 ")),
+    );
+    frame.render_widget(header, chunks[0]);
+
+    let selected = browser
+        .selected
+        .min(browser.entries.len().saturating_sub(1));
+    let visible_rows = usize::from(chunks[1].height.saturating_sub(2)).max(1);
+    let visible_start = palette_visible_start(selected, browser.entries.len(), visible_rows);
+    let items: Vec<ListItem> = browser
+        .entries
+        .iter()
+        .enumerate()
+        .skip(visible_start)
+        .take(visible_rows)
+        .map(|(index, entry)| {
+            let is_selected = index == selected;
+            let base_style = if is_selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(if app.file_browser_focused {
+                        Color::Cyan
+                    } else {
+                        Color::DarkGray
+                    })
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                match entry.kind {
+                    FileBrowserEntryKind::Parent => Style::default().fg(Color::Yellow),
+                    FileBrowserEntryKind::Drive => Style::default().fg(Color::Magenta),
+                    FileBrowserEntryKind::Directory => Style::default().fg(Color::Cyan),
+                    FileBrowserEntryKind::File => Style::default(),
+                }
+            };
+            let marker = if is_selected { ">" } else { " " };
+            ListItem::new(Line::from(vec![
+                Span::styled(marker, base_style),
+                Span::raw(" "),
+                Span::styled(entry.label.clone(), base_style),
+            ]))
+        })
+        .collect();
+    let list_title = format!(
+        " {} {}/{} ",
+        ui_text(app.language, "yazi", "浏览"),
+        selected.saturating_add(1).min(browser.entries.len().max(1)),
+        browser.entries.len().max(1)
+    );
+    frame.render_widget(
+        List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(border_style)
+                .title(list_title),
+        ),
+        chunks[1],
+    );
+
+    let preview = Paragraph::new(file_browser_preview_lines(
+        browser,
+        app.language,
+        chunks[2].width,
+    ))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .title(ui_text(app.language, " preview ", " 预览 ")),
+    );
+    frame.render_widget(preview, chunks[2]);
+
+    let footer = Paragraph::new(Line::from(vec![
+        Span::styled("Ctrl+F", Style::default().fg(Color::Yellow)),
+        Span::raw(ui_text(app.language, " focus  ", " 聚焦  ")),
+        Span::styled("Enter", Style::default().fg(Color::Green)),
+        Span::raw(ui_text(app.language, " open  A agents", " 打开  A Agent")),
+    ]));
+    frame.render_widget(footer, chunks[3]);
+}
+
+fn file_browser_preview_lines(
+    browser: &FileBrowser,
+    language: Language,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let Some(entry) = browser.selected_entry() else {
+        return vec![Line::from(ui_text(language, "empty", "空"))];
+    };
+    let text_width = usize::from(width.saturating_sub(4)).max(8);
+    let kind = match entry.kind {
+        FileBrowserEntryKind::Parent => ui_text(language, "parent", "上级"),
+        FileBrowserEntryKind::Drive => ui_text(language, "drive", "盘符"),
+        FileBrowserEntryKind::Directory => ui_text(language, "directory", "目录"),
+        FileBrowserEntryKind::File => ui_text(language, "file", "文件"),
+    };
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(
+                ui_text(language, "type ", "类型 "),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::raw(kind),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                ui_text(language, "name ", "名称 "),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::raw(tail_to_width(&entry.name, text_width)),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                ui_text(language, "agent cwd ", "Agent 目录 "),
+                Style::default().fg(Color::Green),
+            ),
+            Span::raw(tail_to_width(
+                &browser.agent_cwd().display().to_string(),
+                text_width,
+            )),
+        ]),
+    ];
+
+    if let Ok(metadata) = std::fs::metadata(&entry.path) {
+        if metadata.is_file() {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    ui_text(language, "size ", "大小 "),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::raw(file_size_label(metadata.len())),
+            ]));
+        }
+    }
+
+    if entry.path.is_dir() {
+        let mut children = Vec::new();
+        if let Ok(read_dir) = std::fs::read_dir(&entry.path) {
+            for child in read_dir.flatten().take(4) {
+                children.push(child.file_name().to_string_lossy().to_string());
+            }
+        }
+        if !children.is_empty() {
+            lines.push(Line::from(Span::styled(
+                ui_text(language, "contains", "包含"),
+                Style::default().fg(Color::DarkGray),
+            )));
+            lines.extend(
+                children
+                    .into_iter()
+                    .map(|child| Line::from(format!("  {}", tail_to_width(&child, text_width)))),
+            );
+        }
+    }
+
+    lines
+}
+
+fn file_size_label(size: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let size = size as f64;
+    if size >= GB {
+        format!("{:.1} GB", size / GB)
+    } else if size >= MB {
+        format!("{:.1} MB", size / MB)
+    } else if size >= KB {
+        format!("{:.1} KB", size / KB)
+    } else {
+        format!("{} B", size as u64)
+    }
 }
 
 fn draw_panes(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -3026,6 +3557,7 @@ fn adjust_weight_pair(
 struct UiRegions {
     sidebar: Rect,
     workspace: Rect,
+    file_browser: Option<Rect>,
     group_list: Rect,
     agent_list: Rect,
     pane_list: Rect,
@@ -3033,10 +3565,22 @@ struct UiRegions {
 }
 
 fn compute_ui_regions(area: Rect) -> UiRegions {
-    let root = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(31), Constraint::Min(50)])
-        .split(area);
+    let show_file_browser = area.width >= 120;
+    let root = if show_file_browser {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(31),
+                Constraint::Min(50),
+                Constraint::Length(38),
+            ])
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(31), Constraint::Min(50)])
+            .split(area)
+    };
     let sidebar_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -3058,6 +3602,11 @@ fn compute_ui_regions(area: Rect) -> UiRegions {
     UiRegions {
         sidebar: root[0],
         workspace: root[1],
+        file_browser: if show_file_browser {
+            Some(root[2])
+        } else {
+            None
+        },
         group_list: sidebar_chunks[1],
         agent_list: sidebar_chunks[2],
         pane_list: sidebar_chunks[3],
@@ -3072,6 +3621,19 @@ fn command_palette_list_area(area: Rect) -> Rect {
             Constraint::Length(3),
             Constraint::Min(8),
             Constraint::Length(3),
+        ])
+        .split(area);
+    chunks[1]
+}
+
+fn file_browser_list_area(area: Rect) -> Rect {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(8),
+            Constraint::Length(8),
+            Constraint::Length(2),
         ])
         .split(area);
     chunks[1]
@@ -3654,12 +4216,16 @@ fn draw_help(frame: &mut Frame, area: Rect, language: Language) {
             Line::from("Ctrl+A  刷新 Agent 检测"),
             Line::from("Ctrl+B  编队输入：把普通输入广播到当前分组所有面板"),
             Line::from("Ctrl+P  打开命令面板"),
+            Line::from("Ctrl+F  聚焦右侧文件浏览器"),
             Line::from("Ctrl+T  切换语言"),
             Line::from("Alt+1..9 或 Ctrl+1..9  切换分组"),
             Line::from("鼠标拖动面板边框可调整大小"),
             Line::from("点击侧边栏 Agent，输入路径或用文件浏览器选择目录后按 Enter 启动"),
             Line::from(
                 "路径弹窗：Up/Down 浏览，Left 返回上级，Right 进入选中目录/盘符，Tab 同步输入",
+            ),
+            Line::from(
+                "文件浏览器：Up/Down 选择，Enter/Right 进入目录，Left 返回上级，A 打开 Agent 命令面板",
             ),
             Line::from("未安装的 Agent 会先弹出安装确认，左半点击安装，右半点击取消"),
             Line::from("Ctrl+H  隐藏/显示帮助"),
@@ -3690,6 +4256,7 @@ fn draw_help(frame: &mut Frame, area: Rect, language: Language) {
             Line::from("Ctrl+A  refresh agent detection"),
             Line::from("Ctrl+B  broadcast normal input to all panes in current group"),
             Line::from("Ctrl+P  command palette"),
+            Line::from("Ctrl+F  focus right-side file browser"),
             Line::from("Ctrl+T  switch language"),
             Line::from("Alt+1..9 or Ctrl+1..9  switch group"),
             Line::from("Mouse drag pane borders to resize"),
@@ -3698,6 +4265,9 @@ fn draw_help(frame: &mut Frame, area: Rect, language: Language) {
             ),
             Line::from(
                 "Path prompt: Up/Down browse, Left parent, Right open selected directory/drive, Tab sync input",
+            ),
+            Line::from(
+                "File browser: Up/Down select, Enter/Right open directory, Left parent, A agent commands",
             ),
             Line::from(
                 "Missing agents first ask whether to install; click left half to install or right half to cancel",
@@ -3879,6 +4449,7 @@ KEYS:
   Ctrl+A  refresh agent detection
   Ctrl+B  toggle broadcast input to all panes in current group
   Ctrl+P  command palette
+  Ctrl+F  focus right-side file browser
   Ctrl+T  switch language
   Alt+1..9 or Ctrl+1..9  switch group
   Ctrl+H  help
@@ -3887,6 +4458,8 @@ KEYS:
 MOUSE:
   Left click group     switch group
   Left click agent     ask path, then launch installed agent there
+  Left click file      select in right file browser
+  Right click folder   open folder in right file browser
   Left click pane      focus pane
   Drag pane border     resize panes
   Wheel up/down        scroll pane history

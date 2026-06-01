@@ -37,6 +37,7 @@ Ctrl+O  move pane to next group
 Ctrl+A  refresh agent detection
 Ctrl+B  toggle broadcast input to all panes in current group
 Ctrl+P  command palette
+Ctrl+F  focus right-side file browser
 Ctrl+T  switch language
 Alt+1..9 or Ctrl+1..9  switch group
 Ctrl+H  help
@@ -46,6 +47,7 @@ Ctrl+Q  quit
 Normal typing is sent directly to the focused PTY. Windows duplicate key events are filtered by `KeyEventKind::Press`.
 When broadcast input is enabled with `Ctrl+B`, ordinary typing and paste are sent to every running pane in the active group.
 Press `Ctrl+P` to open the command palette, run common pane/group actions, or quickly start an installed Agent.
+Press `Ctrl+F` to focus the right-side file browser. Use Up/Down to select, Enter/Right to enter a directory, Left to go to the parent directory, `R` to refresh, and `A` to open agent commands for the selected project directory.
 
 Set `WIMX_LANG=zh` to start in Chinese, or press `Ctrl+T` inside Wimx to switch between English and Chinese.
 
@@ -54,6 +56,8 @@ Set `WIMX_LANG=zh` to start in Chinese, or press `Ctrl+T` inside Wimx to switch 
 ```text
 Left click group      switch group
 Left click agent      ask project path, then launch installed agent there
+Left click file       select in the right file browser
+Right click folder    open a folder in the right file browser
 Left click pane       focus pane
 Drag pane border      resize panes
 Wheel up/down         scroll pane history
@@ -74,7 +78,7 @@ hermes    Hermes
 openclaw  OpenClaw
 ```
 
-Installed agents are marked `[ok]` in the sidebar. Click one, enter a project path, and Wimx starts the agent command directly with that path as its working directory.
+Installed agents are marked `[ok]` in the sidebar. Click one, enter a project path, and Wimx starts the agent command directly with that path as its working directory. If the right-side file browser is on a project directory, the agent path prompt starts there by default.
 Press `Ctrl+A` to refresh detection after installing or removing an agent while Wimx is open.
 
 On Windows, Wimx prefers real launchable entries (`.exe`, `.cmd`, `.bat`, `.com`, `.ps1`) over extensionless npm/pnpm shims. Batch shims are launched through `cmd.exe`, and PowerShell shims are launched through Windows PowerShell.
