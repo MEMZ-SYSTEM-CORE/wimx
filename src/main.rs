@@ -120,6 +120,10 @@ fn apply_terminal_cursor(
         execute!(terminal.backend_mut(), SetCursorStyle::SteadyBar, Show)?;
         return Ok(());
     }
+    if app.install_prompt.is_some() || app.command_palette.is_some() || app.show_help {
+        execute!(terminal.backend_mut(), Hide)?;
+        return Ok(());
+    }
 
     let Some(pane) = app.panes.get(app.active) else {
         execute!(terminal.backend_mut(), Hide)?;
@@ -1042,6 +1046,15 @@ fn browser_visible_start(browser: &PathBrowser, visible_rows: usize) -> usize {
         .min(browser.entries.len() - visible_rows)
 }
 
+fn palette_visible_start(selected: usize, command_count: usize, visible_rows: usize) -> usize {
+    if visible_rows == 0 || command_count <= visible_rows {
+        return 0;
+    }
+    selected
+        .saturating_sub(visible_rows / 2)
+        .min(command_count - visible_rows)
+}
+
 impl PathPrompt {
     fn new(agent_index: usize, input: String) -> Self {
         let cwd = path_from_prompt(&input);
@@ -1064,6 +1077,33 @@ impl PathPrompt {
 
 struct InstallPrompt {
     agent_index: usize,
+}
+
+struct CommandPalette {
+    selected: usize,
+}
+
+#[derive(Clone, Copy)]
+enum PaletteAction {
+    NewPane,
+    ClosePane,
+    NextPane,
+    PreviousPane,
+    NewGroup,
+    MovePaneToNextGroup,
+    ToggleLayout,
+    ToggleBroadcast,
+    RefreshAgents,
+    RespawnPane,
+    SwitchLanguage,
+    ToggleHelp,
+    Agent(usize),
+}
+
+struct PaletteCommand {
+    label: String,
+    detail: String,
+    action: PaletteAction,
 }
 
 #[derive(Clone, Copy)]
@@ -1095,6 +1135,7 @@ struct App {
     agents: Vec<AgentTool>,
     path_prompt: Option<PathPrompt>,
     install_prompt: Option<InstallPrompt>,
+    command_palette: Option<CommandPalette>,
     broadcast_input: bool,
     shell: ShellSpec,
     tx: Sender<AppEvent>,
@@ -1120,6 +1161,7 @@ impl App {
             agents: detect_agents(),
             path_prompt: None,
             install_prompt: None,
+            command_palette: None,
             broadcast_input: false,
             shell,
             tx,
@@ -1479,12 +1521,237 @@ impl App {
         };
     }
 
+    fn toggle_layout(&mut self) {
+        self.layout = if self.layout == LayoutMode::Grid {
+            LayoutMode::Stack
+        } else {
+            LayoutMode::Grid
+        };
+        self.reset_layout_weights();
+        self.status = format!(
+            "{} {}",
+            ui_text(self.language, "layout", "布局"),
+            if self.layout == LayoutMode::Grid {
+                ui_text(self.language, "grid", "网格")
+            } else {
+                ui_text(self.language, "stack", "堆叠")
+            }
+        );
+    }
+
+    fn toggle_broadcast(&mut self) {
+        self.broadcast_input = !self.broadcast_input;
+        self.status = ui_text(
+            self.language,
+            if self.broadcast_input {
+                "broadcast input on"
+            } else {
+                "broadcast input off"
+            },
+            if self.broadcast_input {
+                "编队输入已开启"
+            } else {
+                "编队输入已关闭"
+            },
+        )
+        .to_string();
+    }
+
+    fn palette_commands(&self) -> Vec<PaletteCommand> {
+        let mut commands = vec![
+            PaletteCommand {
+                label: ui_text(self.language, "New pane", "新建面板").to_string(),
+                detail: "Ctrl+N".to_string(),
+                action: PaletteAction::NewPane,
+            },
+            PaletteCommand {
+                label: ui_text(self.language, "Close focused pane", "关闭当前面板").to_string(),
+                detail: "Ctrl+W".to_string(),
+                action: PaletteAction::ClosePane,
+            },
+            PaletteCommand {
+                label: ui_text(self.language, "Next pane", "下一个面板").to_string(),
+                detail: "Ctrl+J".to_string(),
+                action: PaletteAction::NextPane,
+            },
+            PaletteCommand {
+                label: ui_text(self.language, "Previous pane", "上一个面板").to_string(),
+                detail: "Ctrl+K".to_string(),
+                action: PaletteAction::PreviousPane,
+            },
+            PaletteCommand {
+                label: ui_text(self.language, "New group", "新建分组").to_string(),
+                detail: "Ctrl+G".to_string(),
+                action: PaletteAction::NewGroup,
+            },
+            PaletteCommand {
+                label: ui_text(
+                    self.language,
+                    "Move pane to next group",
+                    "移动面板到下一分组",
+                )
+                .to_string(),
+                detail: "Ctrl+O".to_string(),
+                action: PaletteAction::MovePaneToNextGroup,
+            },
+            PaletteCommand {
+                label: ui_text(self.language, "Toggle layout", "切换布局").to_string(),
+                detail: "Ctrl+L".to_string(),
+                action: PaletteAction::ToggleLayout,
+            },
+            PaletteCommand {
+                label: ui_text(self.language, "Toggle group broadcast", "切换编队输入").to_string(),
+                detail: "Ctrl+B".to_string(),
+                action: PaletteAction::ToggleBroadcast,
+            },
+            PaletteCommand {
+                label: ui_text(self.language, "Respawn focused pane", "重启当前面板").to_string(),
+                detail: "Ctrl+R".to_string(),
+                action: PaletteAction::RespawnPane,
+            },
+            PaletteCommand {
+                label: ui_text(self.language, "Refresh agents", "刷新 Agent 检测").to_string(),
+                detail: "Ctrl+A".to_string(),
+                action: PaletteAction::RefreshAgents,
+            },
+            PaletteCommand {
+                label: ui_text(self.language, "Switch language", "切换语言").to_string(),
+                detail: "Ctrl+T".to_string(),
+                action: PaletteAction::SwitchLanguage,
+            },
+            PaletteCommand {
+                label: ui_text(self.language, "Toggle help", "显示/隐藏帮助").to_string(),
+                detail: "Ctrl+H".to_string(),
+                action: PaletteAction::ToggleHelp,
+            },
+        ];
+
+        for (index, agent) in self.agents.iter().enumerate() {
+            let state = if agent.installed() {
+                ui_text(self.language, "installed", "已安装")
+            } else {
+                ui_text(self.language, "install", "安装")
+            };
+            commands.push(PaletteCommand {
+                label: format!("Agent: {}", agent.label),
+                detail: format!("{state} / {}", agent.command),
+                action: PaletteAction::Agent(index),
+            });
+        }
+
+        commands
+    }
+
+    fn open_command_palette(&mut self) {
+        self.show_help = false;
+        self.command_palette = Some(CommandPalette { selected: 0 });
+        self.set_status("command palette", "命令面板");
+    }
+
+    fn move_palette_selection(&mut self, delta: isize) {
+        let len = self.palette_commands().len();
+        if len == 0 {
+            return;
+        }
+        if let Some(palette) = self.command_palette.as_mut() {
+            let current = palette.selected.min(len - 1);
+            let next = if delta.is_negative() {
+                current.saturating_sub(delta.unsigned_abs())
+            } else {
+                (current + delta as usize).min(len - 1)
+            };
+            palette.selected = next;
+        }
+    }
+
+    fn run_palette_action(&mut self, action: PaletteAction) -> Result<()> {
+        match action {
+            PaletteAction::NewPane => self.new_pane()?,
+            PaletteAction::ClosePane => self.close_active(),
+            PaletteAction::NextPane => self.focus_next(),
+            PaletteAction::PreviousPane => self.focus_prev(),
+            PaletteAction::NewGroup => self.new_group()?,
+            PaletteAction::MovePaneToNextGroup => self.move_active_to_next_group()?,
+            PaletteAction::ToggleLayout => self.toggle_layout(),
+            PaletteAction::ToggleBroadcast => self.toggle_broadcast(),
+            PaletteAction::RefreshAgents => self.refresh_agents(),
+            PaletteAction::RespawnPane => self.respawn_active(),
+            PaletteAction::SwitchLanguage => self.toggle_language(),
+            PaletteAction::ToggleHelp => self.show_help = !self.show_help,
+            PaletteAction::Agent(index) => self.launch_agent(index)?,
+        }
+        Ok(())
+    }
+
+    fn handle_command_palette_key(&mut self, key: KeyEvent) -> Result<bool> {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('q') => return Ok(true),
+                KeyCode::Char('p') => {
+                    self.command_palette = None;
+                    self.set_status("command palette closed", "命令面板已关闭");
+                    return Ok(false);
+                }
+                _ => {}
+            }
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+                self.command_palette = None;
+                self.set_status("command palette closed", "命令面板已关闭");
+            }
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
+                self.move_palette_selection(-1);
+            }
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
+                self.move_palette_selection(1);
+            }
+            KeyCode::PageUp => {
+                self.move_palette_selection(-5);
+            }
+            KeyCode::PageDown => {
+                self.move_palette_selection(5);
+            }
+            KeyCode::Home => {
+                if let Some(palette) = self.command_palette.as_mut() {
+                    palette.selected = 0;
+                }
+            }
+            KeyCode::End => {
+                let len = self.palette_commands().len();
+                if let Some(palette) = self.command_palette.as_mut() {
+                    palette.selected = len.saturating_sub(1);
+                }
+            }
+            KeyCode::Enter => {
+                let commands = self.palette_commands();
+                let selected = self
+                    .command_palette
+                    .as_ref()
+                    .map(|palette| palette.selected)
+                    .unwrap_or(0)
+                    .min(commands.len().saturating_sub(1));
+                let action = commands.get(selected).map(|command| command.action);
+                self.command_palette = None;
+                if let Some(action) = action {
+                    self.run_palette_action(action)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
+
     fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
         if self.install_prompt.is_some() {
             return self.handle_install_prompt_key(key);
         }
         if self.path_prompt.is_some() {
             return self.handle_path_prompt_key(key);
+        }
+        if self.command_palette.is_some() {
+            return self.handle_command_palette_key(key);
         }
 
         if key.modifiers.contains(KeyModifiers::ALT) {
@@ -1520,12 +1787,11 @@ impl App {
                     return Ok(false);
                 }
                 KeyCode::Char('l') => {
-                    self.layout = if self.layout == LayoutMode::Grid {
-                        LayoutMode::Stack
-                    } else {
-                        LayoutMode::Grid
-                    };
-                    self.reset_layout_weights();
+                    self.toggle_layout();
+                    return Ok(false);
+                }
+                KeyCode::Char('p') => {
+                    self.open_command_palette();
                     return Ok(false);
                 }
                 KeyCode::Char('g') => {
@@ -1553,21 +1819,7 @@ impl App {
                     return Ok(false);
                 }
                 KeyCode::Char('b') => {
-                    self.broadcast_input = !self.broadcast_input;
-                    self.status = ui_text(
-                        self.language,
-                        if self.broadcast_input {
-                            "broadcast input on"
-                        } else {
-                            "broadcast input off"
-                        },
-                        if self.broadcast_input {
-                            "编队输入已开启"
-                        } else {
-                            "编队输入已关闭"
-                        },
-                    )
-                    .to_string();
+                    self.toggle_broadcast();
                     return Ok(false);
                 }
                 _ => {}
@@ -1808,6 +2060,69 @@ impl App {
         Ok(())
     }
 
+    fn handle_command_palette_mouse(&mut self, mouse: MouseEvent) -> Result<()> {
+        let (cols, rows) = crossterm_terminal::size().unwrap_or((DEFAULT_COLS, DEFAULT_ROWS));
+        let area = centered_fixed_rect(78, 18, Rect::new(0, 0, cols.max(1), rows.max(1)));
+        let list_area = command_palette_list_area(area);
+
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                self.move_palette_selection(-1);
+                return Ok(());
+            }
+            MouseEventKind::ScrollDown => {
+                self.move_palette_selection(1);
+                return Ok(());
+            }
+            MouseEventKind::Down(MouseButton::Right) => {
+                self.command_palette = None;
+                self.set_status("command palette closed", "命令面板已关闭");
+                return Ok(());
+            }
+            MouseEventKind::Down(MouseButton::Left) => {}
+            _ => return Ok(()),
+        }
+
+        if !point_in_rect(area, mouse.column, mouse.row) {
+            self.command_palette = None;
+            self.set_status("command palette closed", "命令面板已关闭");
+            return Ok(());
+        }
+
+        let inner = Rect::new(
+            list_area.x + 1,
+            list_area.y + 1,
+            list_area.width.saturating_sub(2),
+            list_area.height.saturating_sub(2),
+        );
+        if !point_in_rect(inner, mouse.column, mouse.row) {
+            return Ok(());
+        }
+
+        let commands = self.palette_commands();
+        if commands.is_empty() {
+            return Ok(());
+        }
+        let selected = self
+            .command_palette
+            .as_ref()
+            .map(|palette| palette.selected)
+            .unwrap_or(0)
+            .min(commands.len().saturating_sub(1));
+        let visible_rows = usize::from(inner.height).max(1);
+        let visible_start = palette_visible_start(selected, commands.len(), visible_rows);
+        let index = visible_start + usize::from(mouse.row.saturating_sub(inner.y));
+        if let Some(command) = commands.get(index) {
+            if let Some(palette) = self.command_palette.as_mut() {
+                palette.selected = index;
+            }
+            let action = command.action;
+            self.command_palette = None;
+            self.run_palette_action(action)?;
+        }
+        Ok(())
+    }
+
     fn resize_drag_from_point(&self, pane_area: Rect, x: u16, y: u16) -> Option<ResizeDrag> {
         let visible_count = self.visible_indices().len();
         if visible_count <= 1 {
@@ -1913,6 +2228,9 @@ impl App {
         }
         if self.path_prompt.is_some() {
             return self.handle_path_prompt_mouse(mouse);
+        }
+        if self.command_palette.is_some() {
+            return self.handle_command_palette_mouse(mouse);
         }
 
         let (cols, rows) = crossterm_terminal::size().unwrap_or((DEFAULT_COLS, DEFAULT_ROWS));
@@ -2048,6 +2366,9 @@ impl App {
         if let Some(prompt) = self.path_prompt.as_mut() {
             let pasted = text.trim_end_matches(['\r', '\n']);
             prompt.input.push_str(pasted);
+            return Ok(());
+        }
+        if self.install_prompt.is_some() || self.command_palette.is_some() {
             return Ok(());
         }
 
@@ -2226,6 +2547,9 @@ fn draw(frame: &mut Frame, app: &mut App) {
 
     if app.show_help {
         draw_help(frame, centered_rect(58, 42, area), app.language);
+    }
+    if app.command_palette.is_some() {
+        draw_command_palette(frame, app, centered_fixed_rect(78, 18, area));
     }
     if app.install_prompt.is_some() {
         draw_install_prompt(frame, app, centered_fixed_rect(64, 9, area));
@@ -2460,10 +2784,11 @@ fn draw_workspace(frame: &mut Frame, app: &mut App, area: Rect) {
     draw_panes(frame, app, chunks[1]);
 
     let hint = format!(
-        "{} {}   {}   Ctrl+B {}  Ctrl+G {}  Ctrl+O {}  Alt+1..9 {}",
+        "{} {}   {}   Ctrl+P {}  Ctrl+B {}  Ctrl+G {}  Ctrl+O {}  Alt+1..9 {}",
         SPINNER[app.spinner],
         ui_text(app.language, "direct PTY input", "直接 PTY 输入"),
         ui_text(app.language, "drag borders resize", "拖动边框调整大小"),
+        ui_text(app.language, "commands", "命令"),
         ui_text(app.language, "broadcast", "编队"),
         ui_text(app.language, "group", "分组"),
         ui_text(app.language, "move", "移动"),
@@ -2740,6 +3065,18 @@ fn compute_ui_regions(area: Rect) -> UiRegions {
     }
 }
 
+fn command_palette_list_area(area: Rect) -> Rect {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(8),
+            Constraint::Length(3),
+        ])
+        .split(area);
+    chunks[1]
+}
+
 fn point_in_rect(rect: Rect, x: u16, y: u16) -> bool {
     x >= rect.x
         && x < rect.x.saturating_add(rect.width)
@@ -2968,6 +3305,111 @@ fn encode_x10_field(out: &mut Vec<u8>, value: u16, utf8_mode: bool) -> Option<()
     let clamped = value.min(255);
     out.push(u8::try_from(clamped).ok()?);
     Some(())
+}
+
+fn draw_command_palette(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(palette) = &app.command_palette else {
+        return;
+    };
+    let commands = app.palette_commands();
+    let command_count = commands.len();
+    let selected = if command_count == 0 {
+        0
+    } else {
+        palette.selected.min(command_count - 1)
+    };
+
+    frame.render_widget(Clear, area);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(8),
+            Constraint::Length(3),
+        ])
+        .split(area);
+
+    let header = Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled(
+                ui_text(app.language, "Command palette", "命令面板"),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled("Ctrl+P", Style::default().fg(Color::DarkGray)),
+        ]),
+        Line::from(ui_text(
+            app.language,
+            "Pick a command or launch an agent.",
+            "选择命令，或快速启动 Agent。",
+        )),
+    ])
+    .block(Block::default().borders(Borders::ALL).title(ui_text(
+        app.language,
+        " command ",
+        " 命令 ",
+    )));
+    frame.render_widget(header, chunks[0]);
+
+    let visible_rows = usize::from(chunks[1].height.saturating_sub(2)).max(1);
+    let visible_start = palette_visible_start(selected, command_count, visible_rows);
+    let items: Vec<ListItem> = commands
+        .iter()
+        .enumerate()
+        .skip(visible_start)
+        .take(visible_rows)
+        .map(|(index, command)| {
+            let is_selected = index == selected;
+            let label_style = if is_selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let detail_style = if is_selected {
+                Style::default().fg(Color::Black).bg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            let marker = if is_selected { ">" } else { " " };
+            ListItem::new(Line::from(vec![
+                Span::styled(marker, label_style),
+                Span::raw(" "),
+                Span::styled(command.label.clone(), label_style),
+                Span::styled(format!("  {}", command.detail), detail_style),
+            ]))
+        })
+        .collect();
+    let title = format!(
+        " {} {}/{} ",
+        ui_text(app.language, "commands", "命令"),
+        selected.saturating_add(1).min(command_count.max(1)),
+        command_count.max(1)
+    );
+    frame.render_widget(
+        List::new(items).block(Block::default().borders(Borders::ALL).title(title)),
+        chunks[1],
+    );
+
+    let footer = Paragraph::new(Line::from(vec![
+        Span::styled(
+            "Enter",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(ui_text(app.language, " run  ", " 执行  ")),
+        Span::styled("Up/Down", Style::default().fg(Color::Yellow)),
+        Span::raw(ui_text(app.language, " select  ", " 选择  ")),
+        Span::styled("Esc", Style::default().fg(Color::Yellow)),
+        Span::raw(ui_text(app.language, " close", " 关闭")),
+    ]))
+    .block(Block::default().borders(Borders::ALL));
+    frame.render_widget(footer, chunks[2]);
 }
 
 fn draw_path_prompt(frame: &mut Frame, app: &App, area: Rect) {
@@ -3211,6 +3653,7 @@ fn draw_help(frame: &mut Frame, area: Rect, language: Language) {
             Line::from("Ctrl+O  移动面板到下一个分组"),
             Line::from("Ctrl+A  刷新 Agent 检测"),
             Line::from("Ctrl+B  编队输入：把普通输入广播到当前分组所有面板"),
+            Line::from("Ctrl+P  打开命令面板"),
             Line::from("Ctrl+T  切换语言"),
             Line::from("Alt+1..9 或 Ctrl+1..9  切换分组"),
             Line::from("鼠标拖动面板边框可调整大小"),
@@ -3246,6 +3689,7 @@ fn draw_help(frame: &mut Frame, area: Rect, language: Language) {
             Line::from("Ctrl+O  move pane to next group"),
             Line::from("Ctrl+A  refresh agent detection"),
             Line::from("Ctrl+B  broadcast normal input to all panes in current group"),
+            Line::from("Ctrl+P  command palette"),
             Line::from("Ctrl+T  switch language"),
             Line::from("Alt+1..9 or Ctrl+1..9  switch group"),
             Line::from("Mouse drag pane borders to resize"),
@@ -3434,6 +3878,7 @@ KEYS:
   Ctrl+O  move pane to next group
   Ctrl+A  refresh agent detection
   Ctrl+B  toggle broadcast input to all panes in current group
+  Ctrl+P  command palette
   Ctrl+T  switch language
   Alt+1..9 or Ctrl+1..9  switch group
   Ctrl+H  help

@@ -36,6 +36,7 @@ Ctrl+G  create group
 Ctrl+O  move pane to next group
 Ctrl+A  refresh agent detection
 Ctrl+B  toggle broadcast input to all panes in current group
+Ctrl+P  command palette
 Ctrl+T  switch language
 Alt+1..9 or Ctrl+1..9  switch group
 Ctrl+H  help
@@ -44,6 +45,7 @@ Ctrl+Q  quit
 
 Normal typing is sent directly to the focused PTY. Windows duplicate key events are filtered by `KeyEventKind::Press`.
 When broadcast input is enabled with `Ctrl+B`, ordinary typing and paste are sent to every running pane in the active group.
+Press `Ctrl+P` to open the command palette, run common pane/group actions, or quickly start an installed Agent.
 
 Set `WIMX_LANG=zh` to start in Chinese, or press `Ctrl+T` inside Wimx to switch between English and Chinese.
 
